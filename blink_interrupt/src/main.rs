@@ -11,8 +11,8 @@ use core::cmp::{max, min};
 use core::sync::atomic::{AtomicBool, Ordering};
 use cortex_m_rt::entry;
 use embedded_hal::digital::v2::{InputPin, OutputPin};
+use tm4c123x::interrupt;
 use tm4c123x::NVIC;
-use tm4c123x::{interrupt, pwm0::INTEN};
 use tm4c123x_hal::delay::Delay;
 use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::prelude::{SysctlExt, _embedded_hal_blocking_delay_DelayMs};
@@ -25,7 +25,8 @@ use tm4c123x_hal::{
     },
 };
 
-static mut RGB: Option<Rgb> = None;
+static DELAY: u16 = 1_u16;
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 // PF4 - Left Button
 // PF0 - Right Button
@@ -40,9 +41,8 @@ struct Rgb {
     lb: PF4<Input<PullUp>>,
     on: bool,
     delay: Delay,
-    delay_cnt: i8,
-    delay_idx: i8,
-    interrupted: bool,
+    delay_cnt: u16,
+    delay_idx: u16,
 }
 
 impl Rgb {
@@ -55,62 +55,60 @@ impl Rgb {
             lb: portf.pf4.into_pull_up_input(),
             on: false,
             delay,
-            delay_cnt: 50,
+            delay_cnt: 1000 / DELAY,
             delay_idx: 0,
-            interrupted: false,
         }
     }
 
-    unsafe fn set_low(&mut self) {
+    fn set_low(&mut self) {
         self.red.set_low().unwrap();
         self.blue.set_low().unwrap();
         self.green.set_low().unwrap();
     }
 
-    unsafe fn set_high(&mut self) {
+    fn set_high(&mut self) {
         self.red.set_high().unwrap();
         self.blue.set_high().unwrap();
         self.green.set_high().unwrap();
     }
 
-    unsafe fn handle_interrupt(&mut self) {
-        if self.interrupted {
+    fn handle_interrupt(&mut self) {
+        if INTERRUPTED.load(Ordering::Relaxed) {
             self.disable_interrupts();
             self.delay.delay_ms(20_u8);
             if self.lb.is_low().unwrap() {
-                self.delay_cnt = min(100, self.delay_cnt + 10);
+                self.delay_cnt = min(2000 / DELAY, self.delay_cnt + 200 / DELAY);
             } else if self.rb.is_low().unwrap() {
-                self.delay_cnt = max(10, self.delay_cnt - 10);
+                self.delay_cnt = max(200 / DELAY, self.delay_cnt - 200 / DELAY);
             }
 
             self.enable_interrupts();
         }
+    }
+
+    fn process(&mut self) {
+        self.handle_interrupt();
 
         self.delay_idx += 1;
         if self.delay_idx % self.delay_cnt == 0 {
             self.toggle();
         }
+        self.delay.delay_ms(DELAY);
     }
 
-    unsafe fn interrupt(&mut self) {
-        self.interrupted = true;
-        self.disable_interrupts();
-    }
-
-    unsafe fn enable_interrupts(&mut self) {
+    fn enable_interrupts(&mut self) {
         // Since the buttons are active low, we have to trigger on falling edge
         self.rb.set_interrupt_mode(InterruptMode::EdgeFalling);
         self.lb.set_interrupt_mode(InterruptMode::EdgeFalling);
-        self.interrupted = false;
     }
 
-    unsafe fn disable_interrupts(&mut self) {
+    fn disable_interrupts(&mut self) {
         self.rb.set_interrupt_mode(InterruptMode::Disabled);
         self.lb.set_interrupt_mode(InterruptMode::Disabled);
         self.delay_idx = 0;
     }
 
-    unsafe fn toggle(&mut self) {
+    fn toggle(&mut self) {
         // Toggle LED
         if self.on {
             self.set_high();
@@ -123,9 +121,7 @@ impl Rgb {
 
 #[interrupt]
 fn GPIOF() {
-    unsafe {
-        RGB.as_mut().unwrap().interrupt();
-    }
+    INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
 fn enable_gpio_interrupts() {
@@ -135,7 +131,7 @@ fn enable_gpio_interrupts() {
 }
 
 #[entry]
-unsafe fn main() -> ! {
+fn main() -> ! {
     let p = hal::Peripherals::take().unwrap();
 
     // Wrap up the SYSCTL struct into an object with a higher-layer API
@@ -151,14 +147,12 @@ unsafe fn main() -> ! {
     let timer = Delay::new(cp.SYST, &clocks);
 
     let portf = p.GPIO_PORTF.split(&sc.power_control);
-    RGB = Some(Rgb::new(portf, timer));
-    // unwrap is expected to work
-    RGB.as_mut().unwrap().set_low();
+    let mut rgb = Rgb::new(portf, timer);
 
     enable_gpio_interrupts();
-    RGB.as_mut().unwrap().enable_interrupts();
+    rgb.enable_interrupts();
 
     loop {
-        RGB.as_mut().unwrap().handle_interrupt();
+        rgb.process();
     }
 }
