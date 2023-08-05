@@ -51,7 +51,7 @@ $ arm-none-eabi-gdb -q target/thumbv7em-none-eabihf/release/blink_interrupt
 Next connect GDB to OpenOCD, which is waiting for a TCP connection on port 3333.
 
 ``` console
-(gdb) target remote :3333
+(gdb) target extended-remote :3333
 ```
 
 Now proceed to flash (load) the program onto the microcontroller using the load command.
