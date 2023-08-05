@@ -117,6 +117,8 @@ impl Buttons {
     fn disable_interrupts(&mut self) {
         self.rb.set_interrupt_mode(InterruptMode::Disabled);
         self.lb.set_interrupt_mode(InterruptMode::Disabled);
+        self.rb.clear_interrupt();
+        self.lb.clear_interrupt();
     }
 
     fn handle_interrupt(&mut self, rgb: &mut Rgb) {
