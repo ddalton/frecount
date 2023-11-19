@@ -8,7 +8,6 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
                      // use panic_itm as _; // logs messages over ITM; requires ITM support
                      // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 
-use core::cmp::{max, min};
 use cortex_m_rt::entry;
 use ssd1322_di::display;
 use tm4c123x_hal as hal;
@@ -45,18 +44,20 @@ fn main() -> ! {
 
     let mut res = porta.pa7.into_push_pull_output();
     let dc = porta.pa6.into_push_pull_output();
-    let scl = porta
+    let sclk = porta
         .pa2
         .into_af_push_pull::<hal::gpio::AF2>(&mut porta.control);
     let mosi = porta
         .pa5
         .into_af_push_pull::<hal::gpio::AF2>(&mut porta.control);
+    // This needs to be configured with an internal pull up as it is not used
+    // by the display NHD-3.12-25664UCB2
     let miso = porta
         .pa4
-        .into_af_push_pull::<hal::gpio::AF2>(&mut porta.control);
+        .into_af_pull_up::<hal::gpio::AF2>(&mut porta.control);
 
     let mut delay = Delay::new(cp.SYST, &clocks);
-    let pins = (scl, miso, mosi);
+    let pins = (sclk, miso, mosi);
 
     let spi = hal::spi::Spi::spi0(
         p.SSI0,
@@ -67,8 +68,8 @@ fn main() -> ! {
         &sc.power_control,
     );
 
-    let sc = porta.pa3.into_push_pull_output();
-    let spi_interface = SPIInterface::new(spi, dc, sc);
+    let cs = porta.pa3.into_push_pull_output();
+    let spi_interface = SPIInterface::new(spi, dc, cs);
 
     let mut disp = display::Ssd1322::new(spi_interface);
     disp.reset(&mut res, &mut delay).unwrap();
