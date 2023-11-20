@@ -11,7 +11,7 @@ cortex-m-rt = "0.7.3"
 embedded-hal = "0.2.7"
 panic-halt = "0.2.0"
 tm4c123x-hal = { version = "0.10.2", features = ["rt"] }
-ssd1322_di = { path = "../../ssd1322_di" }
+ssd1322_di = "0.1.0"
 display-interface-spi = "^ 0.4"
 embedded-graphics = "^ 0.8"
 
