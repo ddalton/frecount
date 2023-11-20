@@ -72,9 +72,11 @@ fn main() -> ! {
     let spi_interface = SPIInterface::new(spi, dc, cs);
 
     let mut disp = display::Ssd1322::new(spi_interface);
-    disp.reset(&mut res, &mut delay).unwrap();
 
+    // reset and init
+    disp.reset(&mut res, &mut delay).unwrap();
     disp.init().unwrap();
+    disp.clear(Gray4::new(0x00)).unwrap();
     disp.flush().unwrap();
 
     let text_style = MonoTextStyleBuilder::new()
@@ -82,14 +84,20 @@ fn main() -> ! {
         .text_color(Gray4::new(0b0000_1111))
         .build();
 
-    Text::with_baseline("Eureka", Point::zero(), text_style, Baseline::Top)
+    Text::with_baseline("Hello World!", Point::zero(), text_style, Baseline::Top)
         .draw(&mut disp)
         .unwrap();
 
-    Text::with_baseline("works!", Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut disp)
-        .unwrap();
+    Text::with_baseline(
+        "by yours truly.",
+        Point::new(0, 16),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(&mut disp)
+    .unwrap();
 
     disp.flush().unwrap();
+
     loop {}
 }
