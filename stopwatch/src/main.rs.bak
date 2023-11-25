@@ -1,0 +1,546 @@
+#![no_std]
+#![no_main]
+
+// pick a panicking behavior
+use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
+                     // use panic_abort as _; // requires nightly
+                     // use panic_itm as _; // logs messages over ITM; requires ITM support
+                     // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
+
+use core::cmp::{max, min};
+use core::sync::atomic::{AtomicBool, Ordering};
+use cortex_m_rt::entry;
+use embedded_hal::digital::v2::{InputPin, OutputPin};
+use tm4c123x_hal::delay::Delay;
+use tm4c123x_hal::gpio::GpioExt;
+use tm4c123x_hal::prelude::{SysctlExt, _embedded_hal_blocking_delay_DelayMs};
+use tm4c123x_hal::sysctl;
+use tm4c123x_hal::tm4c123x::interrupt;
+use tm4c123x_hal::tm4c123x::NVIC;
+use tm4c123x_hal::{
+    self as hal,
+    gpio::{
+        gpiof::{Parts, PF0, PF1, PF2, PF3, PF4},
+        Input, InterruptMode, Output, PullUp, PushPull,
+    },
+};
+
+const DELAY: u16 = 1_u16;
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+// PF4 - Left Button
+// PF0 - Right Button
+//
+// The switches tie the GPIO to ground, so the GPIOs need to be configured
+// with pull-ups, and a value of 0 means the switch is pressed.
+struct Rgb {
+    red: PF1<Output<PushPull>>,
+    blue: PF2<Output<PushPull>>,
+    green: PF3<Output<PushPull>>,
+    rb: PF0<Input<PullUp>>,
+    lb: PF4<Input<PullUp>>,
+    on: bool,
+    delay: Delay,
+    delay_cnt: u16,
+    delay_idx: u16,
+}
+
+impl Rgb {
+    fn new(mut portf: Parts, delay: Delay) -> Self {
+        Rgb {
+            red: portf.pf1.into_push_pull_output(),
+            blue: portf.pf2.into_push_pull_output(),
+            green: portf.pf3.into_push_pull_output(),
+            rb: portf.pf0.unlock(&mut portf.control).into_pull_up_input(),
+            lb: portf.pf4.into_pull_up_input(),
+            on: false,
+            delay,
+            delay_cnt: 1000 / DELAY,
+            delay_idx: 0,
+        }
+    }
+
+    fn set_low(&mut self) {
+        self.red.set_low().unwrap();
+        self.blue.set_low().unwrap();
+        self.green.set_low().unwrap();
+    }
+
+    fn set_high(&mut self) {
+        self.red.set_high().unwrap();
+        self.blue.set_high().unwrap();
+        self.green.set_high().unwrap();
+    }
+
+    fn handle_interrupt(&mut self) {
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            self.disable_interrupts();
+            // Simple switch debouncing using a delay
+            self.delay.delay_ms(20_u8);
+            if self.lb.is_low().unwrap() {
+                self.delay_cnt = min(2000 / DELAY, self.delay_cnt + 200 / DELAY);
+            } else if self.rb.is_low().unwrap() {
+                self.delay_cnt = max(200 / DELAY, self.delay_cnt - 200 / DELAY);
+            }
+
+            self.enable_interrupts();
+        }
+    }
+
+    fn process(&mut self) {
+        self.handle_interrupt();
+
+        self.delay_idx += 1;
+        if self.delay_idx % self.delay_cnt == 0 {
+            self.toggle();
+        }
+    }
+
+    fn enable_interrupts(&mut self) {
+        // Since the buttons are active low, we have to trigger on falling edge
+        self.rb.set_interrupt_mode(InterruptMode::EdgeFalling);
+        self.lb.set_interrupt_mode(InterruptMode::EdgeFalling);
+    }
+
+    fn disable_interrupts(&mut self) {
+        self.rb.set_interrupt_mode(InterruptMode::Disabled);
+        self.lb.set_interrupt_mode(InterruptMode::Disabled);
+        self.delay_idx = 0;
+        INTERRUPTED.store(false, Ordering::SeqCst);
+    }
+
+    fn toggle(&mut self) {
+        // Toggle LED
+        if self.on {
+            self.set_high();
+        } else {
+            self.set_low();
+        }
+        self.on ^= true;
+    }
+}
+
+fn enable_gpio_interrupts() {
+    unsafe {
+        NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::GPIOF);
+    }
+}
+
+#[entry]
+fn main() -> ! {
+    let p = hal::Peripherals::take().unwrap();
+
+    // Wrap up the SYSCTL struct into an object with a higher-layer API
+    let mut sc = p.SYSCTL.constrain();
+    // Pick our oscillation settings
+    sc.clock_setup.oscillator = sysctl::Oscillator::Main(
+        sysctl::CrystalFrequency::_16mhz,
+        sysctl::SystemClock::UsePll(sysctl::PllOutputFrequency::_80_00mhz),
+    );
+    // Configure the PLL with those settings
+    let clocks = sc.clock_setup.freeze();
+    let cp = cortex_m::Peripherals::take().unwrap();
+    let timer = Delay::new(cp.SYST, &clocks);
+
+    let portf = p.GPIO_PORTF.split(&sc.power_control);
+    let mut rgb = Rgb::new(portf, timer);
+
+    enable_gpio_interrupts();
+    rgb.enable_interrupts();
+
+    loop {
+        rgb.process();
+
+        rgb.delay.delay_ms(DELAY);
+    }
+}
+
+#[interrupt]
+fn GPIOA() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn GPIOB() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn GPIOC() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn GPIOD() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn GPIOE() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn SSI0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn I2C0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM0_FAULT() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM0_0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM0_1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM0_2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn QEI0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC0SS0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC0SS1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC0SS2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC0SS3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WATCHDOG() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER0A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER0B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER1A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER1B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER2A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER2B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn COMP0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn COMP1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn SYSCTL() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn FLASH() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn GPIOF() {
+    INTERRUPTED.store(true, Ordering::SeqCst)
+}
+
+#[interrupt]
+fn UART2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn SSI1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER3A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER3B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn I2C1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn QEI1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn CAN0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn CAN1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn HIBERNATE() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn USB0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM0_3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UDMA() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UDMAERR() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC1SS0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC1SS1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC1SS2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn ADC1SS3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn SSI2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn SSI3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART4() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART5() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART6() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn UART7() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn I2C2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn I2C3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER4A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER4B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER5A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn TIMER5B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER0A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER0B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER1A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER1B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER2A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER2B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER3A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER3B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER4A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER4B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER5A() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn WTIMER5B() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn SYSEXC() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM1_0() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM1_1() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM1_2() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM1_3() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+#[interrupt]
+fn PWM1_FAULT() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
