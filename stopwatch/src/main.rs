@@ -7,6 +7,7 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
                      // use panic_itm as _; // logs messages over ITM; requires ITM support
                      // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 
+use core::str;
 use core::sync::atomic::{AtomicBool, Ordering};
 use cortex_m_rt::entry;
 use tm4c123x_hal::prelude::SysctlExt;
@@ -22,6 +23,50 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn enable_timer1_interrupt() {
     unsafe {
         NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::TIMER1A);
+    }
+}
+
+struct Stopwatch {
+    buffer: [u8; 8],
+}
+
+impl Stopwatch {
+    fn to_str(&self) -> &str {
+        str::from_utf8(&self.buffer).unwrap()
+    }
+
+    fn tick(&mut self) {
+        self.buffer[7] += 1;
+
+        // ripple carry
+        if self.buffer[7] == 58 {
+            self.buffer[7] = 48;
+
+            self.buffer[6] += 1;
+            if self.buffer[6] == 58 {
+                self.buffer[6] = 48;
+
+                self.buffer[4] += 1;
+                if self.buffer[4] == 58 {
+                    self.buffer[4] = 48;
+
+                    self.buffer[3] += 1;
+                    if self.buffer[3] == 54 {
+                        self.buffer[3] = 48;
+
+                        self.buffer[1] += 1;
+                        if self.buffer[1] == 58 {
+                            self.buffer[1] = 48;
+
+                            self.buffer[0] += 1;
+                            if self.buffer[0] == 54 {
+                                self.buffer = [48, 48, 58, 48, 48, 46, 48, 48];
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
