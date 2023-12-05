@@ -193,6 +193,8 @@ fn main() -> ! {
 fn TIMER1A() {
     INTERRUPTED.store(true, Ordering::SeqCst);
     unsafe {
+        // Unfortunate that the method is called wait, but we are not
+        // actually waiting here, but clearing the timer interrupt.
         TIMER_100HZ.as_mut().map(|t| t.wait());
     }
 }
