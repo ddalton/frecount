@@ -10,7 +10,6 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
 
 use core::str;
 use core::sync::atomic::{AtomicBool, Ordering};
-use cortex_m::prelude::_embedded_hal_blocking_delay_DelayMs;
 use cortex_m_rt::entry;
 use ssd1322_di::display;
 use tm4c123x_hal::delay::Delay;
@@ -20,6 +19,7 @@ use tm4c123x_hal::prelude::U32Ext;
 use tm4c123x_hal::sysctl;
 use tm4c123x_hal::tm4c123x::interrupt;
 use tm4c123x_hal::tm4c123x::NVIC;
+use tm4c123x_hal::tm4c123x::TIMER1;
 use tm4c123x_hal::{
     self as hal,
     time::Hertz,
@@ -36,11 +36,11 @@ use {
 };
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static mut TIMER_100HZ: Option<Timer<TIMER1>> = None;
 
 struct Stopwatch {
     buffer: [u8; 8],
 }
-
 impl Stopwatch {
     fn to_str(&self) -> &str {
         str::from_utf8(&self.buffer).unwrap()
@@ -91,8 +91,9 @@ fn enable_timer1_interrupt() {
 
 #[entry]
 fn main() -> ! {
-    let cp = cortex_m::Peripherals::take().unwrap();
     let p = hal::Peripherals::take().unwrap();
+    // set timer1
+    p.SYSCTL.rcgctimer.write(|w| w.r1().set_bit());
 
     // Wrap up the SYSCTL struct into an object with a higher-layer API
     let mut sc = p.SYSCTL.constrain();
@@ -121,6 +122,7 @@ fn main() -> ! {
         .pa4
         .into_af_pull_up::<hal::gpio::AF2>(&mut porta.control);
 
+    let cp = cortex_m::Peripherals::take().unwrap();
     let mut delay = Delay::new(cp.SYST, &clocks);
     let pins = (sclk, miso, mosi);
 
@@ -142,54 +144,55 @@ fn main() -> ! {
     disp.reset(&mut res, &mut delay).unwrap();
     disp.init().unwrap();
     disp.clear(Gray4::new(0x00)).unwrap();
-    disp.flush().unwrap();
+    disp.flush_all().unwrap();
 
     let text_style = MonoTextStyleBuilder::new()
         .font(&FONT_10X20)
         .text_color(Gray4::new(0b0000_1111))
         .background_color(Gray4::new(0b0000_0000))
         .build();
+    /*
+        Text::with_baseline(sw.to_str(), Point::new(10, 16), text_style, Baseline::Top)
+            .draw(&mut disp)
+            .unwrap();
+        disp.flush().unwrap();
+    */
+
+    // Setup 100Hz timer
+    unsafe {
+        TIMER_100HZ = Some(Timer::timer1(
+            p.TIMER1,
+            Hertz(100),
+            &sc.power_control,
+            &clocks,
+        ));
+        TIMER_100HZ.as_mut().map(|t| t.listen(TimeOut));
+    }
+    enable_timer1_interrupt();
 
     // Stopwatch instance
     let mut sw = Stopwatch {
         buffer: [48, 48, 58, 48, 48, 46, 48, 48],
     };
-    /*
-    Text::with_baseline(sw.to_str(), Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut disp)
-        .unwrap();
-    disp.flush().unwrap();
-
-    // Setup 100Hz timer
-    enable_timer1_interrupt();
-    let mut timer = Timer::timer1(p.TIMER1, Hertz(1), &sc.power_control, &clocks);
-    timer.listen(TimeOut);
-    */
-
-    /*
-    sw.tick();
-    Text::with_baseline(sw.to_str(), Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut disp)
-        .unwrap();
-    disp.flush().unwrap();
-    */
 
     loop {
-        delay.delay_ms(10u16);
-        //        if INTERRUPTED.load(Ordering::Relaxed) {
-        //            INTERRUPTED.store(false, Ordering::SeqCst);
+        if INTERRUPTED.load(Ordering::Relaxed) {
+            INTERRUPTED.store(false, Ordering::SeqCst);
 
-        Text::with_baseline(sw.to_str(), Point::new(10, 16), text_style, Baseline::Top)
-            .draw(&mut disp)
-            .unwrap();
-        disp.flush_changed().unwrap();
+            Text::with_baseline(sw.to_str(), Point::new(10, 16), text_style, Baseline::Top)
+                .draw(&mut disp)
+                .unwrap();
+            disp.flush().unwrap();
 
-        sw.tick();
-        //        }
+            sw.tick();
+        }
     }
 }
 
 #[interrupt]
 fn TIMER1A() {
     INTERRUPTED.store(true, Ordering::SeqCst);
+    unsafe {
+        TIMER_100HZ.as_mut().map(|t| t.wait());
+    }
 }
