@@ -97,7 +97,11 @@ fn main() -> ! {
 
     // Wrap up the SYSCTL struct into an object with a higher-layer API
     let mut sc = p.SYSCTL.constrain();
-    let mut porta = p.GPIO_PORTA.split(&sc.power_control);
+    let porte = p.GPIO_PORTE.split(&sc.power_control);
+    let mut portb = p.GPIO_PORTB.split(&sc.power_control);
+    let portf = p.GPIO_PORTF.split(&sc.power_control);
+    let mut portd = p.GPIO_PORTD.split(&sc.power_control);
+    let pd7 = portd.pd7.unlock(&mut portd.control);
 
     // Pick our oscillation settings
     sc.clock_setup.oscillator = sysctl::Oscillator::Main(
@@ -108,26 +112,26 @@ fn main() -> ! {
     let clocks = sc.clock_setup.freeze();
 
     // Setup Display
-    let mut res = porta.pa7.into_push_pull_output();
-    let dc = porta.pa6.into_push_pull_output();
-    let sclk = porta
-        .pa2
-        .into_af_push_pull::<hal::gpio::AF2>(&mut porta.control);
-    let mosi = porta
-        .pa5
-        .into_af_push_pull::<hal::gpio::AF2>(&mut porta.control);
+    let mut res = pd7.into_push_pull_output();
+    let dc = portf.pf4.into_push_pull_output();
+    let sclk = portb
+        .pb4
+        .into_af_push_pull::<hal::gpio::AF2>(&mut portb.control);
+    let mosi = portb
+        .pb7
+        .into_af_push_pull::<hal::gpio::AF2>(&mut portb.control);
     // This needs to be configured with an internal pull up as it is not used
     // by the display NHD-3.12-25664UCB2
-    let miso = porta
-        .pa4
-        .into_af_pull_up::<hal::gpio::AF2>(&mut porta.control);
+    let miso = portb
+        .pb6
+        .into_af_pull_up::<hal::gpio::AF2>(&mut portb.control);
 
     let cp = cortex_m::Peripherals::take().unwrap();
     let mut delay = Delay::new(cp.SYST, &clocks);
     let pins = (sclk, miso, mosi);
 
-    let spi = hal::spi::Spi::spi0(
-        p.SSI0,
+    let spi = hal::spi::Spi::spi2(
+        p.SSI2,
         pins,
         hal::spi::MODE_0,
         2_u32.mhz(),
@@ -135,7 +139,7 @@ fn main() -> ! {
         &sc.power_control,
     );
 
-    let cs = porta.pa3.into_push_pull_output();
+    let cs = porte.pe0.into_push_pull_output();
     let spi_interface = SPIInterface::new(spi, dc, cs);
 
     let mut disp = display::Ssd1322::new(spi_interface);

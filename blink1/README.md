@@ -35,14 +35,16 @@ $ cargo build --release
 
 ## Flash using gdb
 
-On a terminal run openocd to connect to the debug MCU on the board. Run this command from the root of the template; openocd will pick up the openocd.cfg file which indicates which interface file and target file to use.
+Connect the EK-TM4C123GXL evaluation board to the computer (Mac laptop in my case).
+
+On a terminal run openocd to connect to the debug MCU on the board. Run this command from the root of the project; openocd will pick up the openocd.cfg file which indicates which interface file and target file to use.
 NOTE: the power switch should be towards the debug MCU.
 
 ``` console
 $ openocd
 ```
 
-On another terminal run GDB, also from the root of the template.
+On another terminal run GDB, also from the root of the project.
 
 ``` console
 $ arm-none-eabi-gdb -q target/thumbv7em-none-eabihf/release/blink1
