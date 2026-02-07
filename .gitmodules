@@ -1,0 +1,3 @@
+[submodule "LS7366_di"]
+	path = LS7366_di
+	url = ./LS7366_di/
