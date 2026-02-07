@@ -1,46 +1,43 @@
 #![no_std]
 #![no_main]
 
-use cortex_m::prelude::_embedded_hal_timer_CountDown;
-// pick a panicking behavior
-use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch panics
-                     // use panic_abort as _; // requires nightly
-                     // use panic_itm as _; // logs messages over ITM; requires ITM support
-                     // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
-
+use panic_halt as _;
+use cortex_m_rt::entry;
+use embedded_hal::digital::{ErrorType, OutputPin};
+use embedded_hal::spi::{Error, ErrorKind, ErrorType as SpiErrorType, SpiBus, SpiDevice};
+use embedded_hal::delay::DelayNs;
+use embedded_hal_bus::spi::ExclusiveDevice;
 use core::str;
 use core::sync::atomic::{AtomicBool, Ordering};
-use cortex_m_rt::entry;
 use ssd1322_di::display;
-use tm4c123x_hal::delay::Delay;
-use tm4c123x_hal::gpio::GpioExt;
-use tm4c123x_hal::prelude::SysctlExt;
-use tm4c123x_hal::prelude::U32Ext;
-use tm4c123x_hal::sysctl;
-use tm4c123x_hal::tm4c123x::interrupt;
-use tm4c123x_hal::tm4c123x::NVIC;
-use tm4c123x_hal::tm4c123x::TIMER1;
+use display_interface_spi::SPIInterface;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
+    pixelcolor::Gray4,
+    prelude::*,
+    text::{Baseline, Text},
+};
 use tm4c123x_hal::{
     self as hal,
+    delay::Delay,
+    gpio::GpioExt,
+    prelude::*,
+    spi::{Spi, MODE_0},
+    sysctl::{self, SysctlExt},
     time::Hertz,
-    timer::{Event::TimeOut, Timer},
-};
-use {
-    display_interface_spi::SPIInterface,
-    embedded_graphics::{
-        mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
-        pixelcolor::Gray4,
-        prelude::*,
-        text::{Baseline, Text},
-    },
+    timer::{Event, Timer},
+    tm4c123x::{interrupt, NVIC, SSI2, TIMER1},
 };
 
+// Global timer for interrupt
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-static mut TIMER_100HZ: Option<Timer<TIMER1>> = None;
+static mut TIMER_100HZ: Option<TimerWrapper> = None;
 
+// Stopwatch state
 struct Stopwatch {
     buffer: [u8; 8],
 }
+
 impl Stopwatch {
     fn to_str(&self) -> &str {
         str::from_utf8(&self.buffer).unwrap()
@@ -81,71 +78,219 @@ impl Stopwatch {
     }
 }
 
-// Since the timer is configured as a 32-bit concatenated timer, it is sufficient to work with
-// TIMER1A.
+// SPI wrapper to adapt tm4c123x_hal::spi::Spi to embedded_hal::spi::SpiBus
+struct SpiBusWrapper {
+    spi: Spi<SSI2, (hal::gpio::Pin<hal::gpio::portb::PB4, hal::gpio::AlternateFunction<hal::gpio::PushPull, 2>>, hal::gpio::Pin<hal::gpio::portb::PB6, hal::gpio::AlternateFunction<hal::gpio::PullUp, 2>>, hal::gpio::Pin<hal::gpio::portb::PB7, hal::gpio::AlternateFunction<hal::gpio::PushPull, 2>>)>,
+}
+
+impl SpiBusWrapper {
+    fn new(spi: Spi<SSI2, (hal::gpio::Pin<hal::gpio::portb::PB4, hal::gpio::AlternateFunction<hal::gpio::PushPull, 2>>, hal::gpio::Pin<hal::gpio::portb::PB6, hal::gpio::AlternateFunction<hal::gpio::PullUp, 2>>, hal::gpio::Pin<hal::gpio::portb::PB7, hal::gpio::AlternateFunction<hal::gpio::PushPull, 2>>)>) -> Self {
+        SpiBusWrapper { spi }
+    }
+}
+
+#[derive(Debug)]
+pub enum SpiError {
+    Overrun,
+    Timeout,
+    FifoFull,
+    FifoEmpty,
+}
+
+impl Error for SpiError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            SpiError::Overrun => ErrorKind::Overrun,
+            SpiError::Timeout => ErrorKind::Other,
+            SpiError::FifoFull => ErrorKind::Other,
+            SpiError::FifoEmpty => ErrorKind::Other,
+        }
+    }
+}
+
+impl SpiErrorType for SpiBusWrapper {
+    type Error = SpiError;
+}
+
+impl SpiBus<u8> for SpiBusWrapper {
+    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        let mut dummy = vec![0u8; words.len()];
+        self.spi.transfer(words, &mut dummy).map_err(|_| SpiError::Timeout)?;
+        Ok(())
+    }
+
+    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        self.spi.write(words).map_err(|_| SpiError::Timeout)?;
+        Ok(())
+    }
+
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        if read.len() != write.len() {
+            return Err(SpiError::Timeout);
+        }
+        self.spi.transfer(read, write).map_err(|_| SpiError::Timeout)?;
+        Ok(())
+    }
+
+    fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        let mut dummy Hawkins for word in words.iter_mut() {
+            let dummy = vec![0u8; words.len()];
+            self.spi.transfer(words, &dummy).map_err(|_| SpiError::Timeout)?;
+            Ok(())
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        while self.spi.ssi.sr.read().bsy().bit_is_set() {}
+        Ok(())
+    }
+}
+
+// Timer wrapper to adapt tm4c123x_hal::timer::Timer for interrupt-driven timing
+struct TimerWrapper {
+    timer: Timer<TIMER1>,
+}
+
+impl TimerWrapper {
+    fn new(timer: Timer<TIMER1>) -> Self {
+        TimerWrapper { timer }
+    }
+
+    fn listen(&mut self) {
+        self.timer.listen(Event::TimeOut);
+    }
+
+    fn wait(&mut self) {
+        self.timer.wait();
+    }
+}
+
+// Custom error type for infallible operations
+#[derive(Debug)]
+pub enum NoError {}
+
+impl ErrorType for PinWrapper<PIN>
+where
+    PIN: hal::gpio::OutputPin,
+{
+    type Error = NoError;
+}
+
+impl<PIN> embedded_hal::digital::OutputPin for PinWrapper<PIN>
+where
+    PIN: hal::gpio::OutputPin,
+{
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        self.pin.set_low();
+        Ok(())
+    }
+
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        self.pin.set_high();
+        Ok(())
+    }
+}
+
+// Delay wrapper to adapt tm4c123x_hal::delay::Delay to embedded_hal::delay::DelayNs
+struct DelayWrapper {
+    delay: Delay,
+}
+
+impl DelayWrapper {
+    fn new(delay: Delay) -> Self {
+        DelayWrapper { delay }
+    }
+}
+
+impl DelayNs for DelayWrapper {
+    fn delay_ns(&mut self, ns: u32) {
+        let ms = (ns + 999_999) / 1_000_000;
+        self.delay.delay_ms(ms);
+    }
+
+    fn delay_ms(&mut self, ms: u32) {
+        self.delay.delay_ms(ms);
+    }
+
+    fn delay_us(&mut self, us: u32) {
+        let ms = (us + 999) / 1000;
+        self.delay.delay_ms(ms);
+    }
+}
+
+// Enable timer interrupt
 fn enable_timer1_interrupt() {
     unsafe {
-        NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::TIMER1A);
+        NVIC::unmask(hal::tm4c123x::Interrupt::TIMER1A);
     }
 }
 
 #[entry]
 fn main() -> ! {
     let p = hal::Peripherals::take().unwrap();
-    // set timer1
-    p.SYSCTL.rcgctimer.write(|w| w.r1().set_bit());
+    let cp = cortex_m::Peripherals::take().unwrap();
 
-    // Wrap up the SYSCTL struct into an object with a higher-layer API
+    // Initialize clocks
     let mut sc = p.SYSCTL.constrain();
+    sc.clock_setup.oscillator = sysctl::Oscillator::Main(
+        sysctl::CrystalFrequency::_16mhz,
+        sysctl::SystemClock::UsePll(sysctl::PllOutputFrequency::_80_00mhz),
+    );
+    let clocks = sc.clock_setup.freeze();
+
+    // Initialize GPIO
     let porte = p.GPIO_PORTE.split(&sc.power_control);
     let mut portb = p.GPIO_PORTB.split(&sc.power_control);
     let portf = p.GPIO_PORTF.split(&sc.power_control);
     let mut portd = p.GPIO_PORTD.split(&sc.power_control);
     let pd7 = portd.pd7.unlock(&mut portd.control);
 
-    // Pick our oscillation settings
-    sc.clock_setup.oscillator = sysctl::Oscillator::Main(
-        sysctl::CrystalFrequency::_16mhz,
-        sysctl::SystemClock::UsePll(sysctl::PllOutputFrequency::_80_00mhz),
-    );
-    // Configure the PLL with those settings
-    let clocks = sc.clock_setup.freeze();
-
-    // Setup Display
-    let mut res = pd7.into_push_pull_output();
-    let dc = portf.pf4.into_push_pull_output();
+    // SPI pins (SSI2)
     let sclk = portb
         .pb4
         .into_af_push_pull::<hal::gpio::AF2>(&mut portb.control);
     let mosi = portb
         .pb7
         .into_af_push_pull::<hal::gpio::AF2>(&mut portb.control);
-    // This needs to be configured with an internal pull up as it is not used
-    // by the display NHD-3.12-25664UCB2
     let miso = portb
         .pb6
         .into_af_pull_up::<hal::gpio::AF2>(&mut portb.control);
-
-    let cp = cortex_m::Peripherals::take().unwrap();
-    let mut delay = Delay::new(cp.SYST, &clocks);
     let pins = (sclk, miso, mosi);
 
-    let spi = hal::spi::Spi::spi2(
+    // Initialize SPI
+    let spi = Spi::spi2(
         p.SSI2,
         pins,
-        hal::spi::MODE_0,
-        2_u32.mhz(),
+        MODE_0,
+        2_000_000_u32.hz(),
         &clocks,
         &sc.power_control,
     );
+    let spi_bus = SpiBusWrapper::new(spi);
 
-    let cs = porte.pe0.into_push_pull_output();
-    let spi_interface = SPIInterface::new(spi, dc, cs);
+    // GPIO pins
+    let cs1 = PinWrapper::new(porte.pe0.into_push_pull_output());
+    let cs2 = PinWrapper::new(porte.pe1.into_push_pull_output()); // Second device CS
+    let dc = PinWrapper::new(portf.pf4.into_push_pull_output());
+    let reset = PinWrapper::new(pd7.into_push_pull_output());
 
+    // Initialize delay
+    let mut delay = DelayWrapper::new(Delay::new(cp.SYST, &clocks));
+
+    // Initialize timer
+    let mut timer = Timer::timer1(p.TIMER1, Hertz(100), &sc.power_control, &clocks);
+    let mut timer_wrapper = TimerWrapper::new(timer);
+
+    // Create SPI devices sharing SSI2
+    let display1 = ExclusiveDevice::new(spi_bus, cs1, &mut delay).unwrap();
+    let display2 = ExclusiveDevice::new(display1.bus(), cs2, &mut delay).unwrap();
+
+    // Setup display
+    let spi_interface = SPIInterface::new(display1, dc);
     let mut disp = display::Ssd1322::new(spi_interface);
 
-    // reset and init
-    disp.reset(&mut res, &mut delay).unwrap();
+    // Reset and initialize display
+    disp.reset(&mut reset, &mut delay).unwrap();
     disp.init().unwrap();
     disp.clear(Gray4::new(0x00)).unwrap();
     disp.flush_all().unwrap();
@@ -155,22 +300,13 @@ fn main() -> ! {
         .text_color(Gray4::new(0b0000_1111))
         .background_color(Gray4::new(0b0000_0000))
         .build();
-    /*
-        Text::with_baseline(sw.to_str(), Point::new(10, 16), text_style, Baseline::Top)
-            .draw(&mut disp)
-            .unwrap();
-        disp.flush().unwrap();
-    */
 
     // Setup 100Hz timer
     unsafe {
-        TIMER_100HZ = Some(Timer::timer1(
-            p.TIMER1,
-            Hertz(100),
-            &sc.power_control,
-            &clocks,
-        ));
-        TIMER_100HZ.as_mut().map(|t| t.listen(TimeOut));
+        TIMER_100HZ = Some(timer_wrapper);
+        TIMER_100HZ.as_mut().map(|t| {
+            t.listen();
+        });
     }
     enable_timer1_interrupt();
 
@@ -197,8 +333,6 @@ fn main() -> ! {
 fn TIMER1A() {
     INTERRUPTED.store(true, Ordering::SeqCst);
     unsafe {
-        // Unfortunate that the method is called wait, but we are not
-        // actually waiting here, but clearing the timer interrupt.
         TIMER_100HZ.as_mut().map(|t| t.wait());
     }
 }

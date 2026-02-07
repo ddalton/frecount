@@ -6,37 +6,20 @@ name = "stopwatch"
 version = "0.1.0"
 
 [dependencies]
+embedded-hal = { version = "1.0", features = [] }
+embedded-hal-bus = { version = "0.1", features = ["defmt-03"] }
 cortex-m = "0.7.6"
 cortex-m-rt = "0.7.3"
-embedded-hal = "0.2.7"
 panic-halt = "0.2.0"
-tm4c123x-hal = { version = "0.10.2", features = ["rt"] }
-#ssd1322_di = { path = "../../ssd1322_di" }
+tm4c123x-hal = { version = "0.10.3", features = ["rt"] }
 ssd1322_di = "0.2.0"
-display-interface-spi = "^ 0.4"
-embedded-graphics = "^ 0.8"
+display-interface-spi = "0.4"
+embedded-graphics = "0.8"
 
-# Uncomment for the panic example.
-# panic-itm = "0.4.1"
-
-# Uncomment for the allocator example.
-# alloc-cortex-m = "0.4.0"
-
-# Uncomment for the device example.
-# Update `memory.x`, set target to `thumbv7em-none-eabihf` in `.cargo/config`,
-# and then use `cargo build --examples device` to build it.
-# [dependencies.stm32f3]
-# features = ["stm32f303", "rt"]
-# version = "0.7.1"
-
-# this lets you use `cargo fix`!
 [[bin]]
 name = "stopwatch"
 test = false
 bench = false
 
 [profile.release]
-#codegen-units = 1 # better optimizations
-debug = true # symbols are nice and they don't increase the size on Flash
-#lto = true # better optimizations
-#strip = true # strips out the symbols and makes the executable small
+debug = true
