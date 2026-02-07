@@ -1,0 +1,24 @@
+[package]
+authors = ["ddalton"]
+edition = "2018"
+name = "spi_counter"
+version = "0.1.0"
+
+[dependencies]
+cortex-m = "0.7.6"
+cortex-m-rt = "0.7.3"
+embedded-hal = "0.2.7"
+panic-halt = "0.2.0"
+tm4c123x-hal = { version = "0.10.2", features = ["rt"] }
+ls7366 = { path = "../LS7366_di" }
+ssd1322_di = { path = "/Users/ddalton/github/ssd1322_di" }
+display-interface-spi = "0.4"
+embedded-graphics = "0.8"
+
+[[bin]]
+name = "spi_counter"
+test = false
+bench = false
+
+[profile.release]
+debug = true
