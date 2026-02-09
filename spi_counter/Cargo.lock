@@ -259,7 +259,9 @@ dependencies = [
 
 [[package]]
 name = "ssd1322_di"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3b9b4e51341eafac84e4f5237879ae1cca817aa0035d9a17db4bb598a6bf2c"
 dependencies = [
  "display-interface",
  "embedded-graphics",

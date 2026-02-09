@@ -38,6 +38,22 @@ const PD6_BIT: u32 = 1 << 6;
 
 // --- Helpers ---
 
+/// Drain the SSI2 RX FIFO of stale data left by write-only SPI operations.
+///
+/// The `embedded_hal` blocking `Write` trait sends bytes but never reads from
+/// the RX FIFO.  Because SPI is always full-duplex at the hardware level, every
+/// transmitted byte also pushes a received byte into the FIFO.  If those bytes
+/// are not consumed, a subsequent `Transfer` (used by the LS7366 driver to read
+/// the counter) will pick up the stale values instead of the real response.
+fn drain_spi_rx_fifo() {
+    unsafe {
+        let ssi2 = &*tm4c123x::SSI2::ptr();
+        while ssi2.sr.read().rne().bit_is_set() {
+            let _ = ssi2.dr.read();
+        }
+    }
+}
+
 /// Small buffer for formatting integers in no_std.
 struct FmtBuf {
     buf: [u8; 20],
@@ -133,9 +149,9 @@ fn main() -> ! {
     // --- Counter pins ---
     let counter_cs = porta.pa3.into_push_pull_output(); // CS for LS7366
     let mut counter_b = porta.pa2.into_push_pull_output(); // B input (direction)
-    counter_b.set_low().ok(); // LOW = count up
-    let mut cnt_en = porte.pe4.into_push_pull_output(); // CNT_EN (active low)
-    cnt_en.set_low().ok(); // LOW = counting enabled
+    counter_b.set_high().ok(); // HIGH = count up (per datasheet)
+    let mut cnt_en = porte.pe4.into_push_pull_output(); // CNT_EN (active high)
+    cnt_en.set_high().ok(); // HIGH = counting enabled
     let _index = portb.pb2.into_floating_input(); // INDEX (unused, leave as input)
     let _dflag = porta.pa4.into_floating_input(); // DFLAG (unused, leave as input)
 
@@ -163,6 +179,9 @@ fn main() -> ! {
     // Release display to get SPI back
     let spi_iface = disp.release();
     let (spi, mut display_dc, mut display_cs) = spi_iface.release();
+
+    // Drain stale RX FIFO bytes left by the display's write-only SPI init
+    drain_spi_rx_fifo();
 
     // --- Initialize counter (NonQuad mode) ---
     let mut counter = Ls7366::new_uninit(spi, counter_cs).unwrap();
@@ -193,6 +212,23 @@ fn main() -> ! {
         .unwrap();
 
     counter.clear_status().unwrap();
+
+    // Zero the counter: write 0 to DTR, then load DTR into CNTR
+    counter
+        .write_register(ls7366::Target::Dtr, &[0x00, 0x00, 0x00, 0x00])
+        .unwrap();
+    counter
+        .act(
+            ls7366::ir::InstructionRegister {
+                target: ls7366::Target::Cntr,
+                action: ls7366::Action::Load,
+            },
+            &mut [0x00],
+        )
+        .unwrap();
+
+    // Drain stale RX bytes left by the counter's write-only init commands
+    drain_spi_rx_fifo();
 
     // --- Setup TIMER0 at 2kHz (toggles PD6 in ISR -> 1kHz square wave) ---
     let timer = Timer::timer0(p.TIMER0, 2000_u32.hz(), &sc.power_control, &clocks);
@@ -254,6 +290,9 @@ fn main() -> ! {
         let (spi, dc, cs) = spi_iface.release();
         display_dc = dc;
         display_cs = cs;
+
+        // Drain stale RX FIFO bytes left by the display's write-only SPI ops
+        drain_spi_rx_fifo();
 
         // Recreate counter (chip config persists in hardware)
         counter = Ls7366::new_uninit(spi, counter_cs).unwrap();
